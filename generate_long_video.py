@@ -15,6 +15,8 @@ import re
 import struct
 import subprocess
 import sys
+import time
+import xml.etree.ElementTree as ET
 import urllib.parse
 import wave
 from datetime import datetime, timedelta, timezone
@@ -144,6 +146,25 @@ Use Google Search to gather 5 real, currently relevant products/topics in India 
                 break
         except Exception as exc:
             print(f"[WARN] Search pass failed on {m}: {exc}")
+
+    if not research_text.strip():
+        try:
+            rss = requests.get(
+                "https://news.google.com/rss/search?q=India+launch+smartphone+OR+earbuds+OR+laptop+OR+smart+TV+price&hl=en-IN&gl=IN&ceid=IN:en",
+                timeout=15,
+            )
+            if rss.ok:
+                root = ET.fromstring(rss.content)
+                headlines = []
+                for item in root.findall(".//item")[:8]:
+                    t_el = item.find("title")
+                    l_el = item.find("link")
+                    if t_el is not None and t_el.text:
+                        headlines.append(f"- {t_el.text.strip()} ({(l_el.text or '').strip() if l_el is not None else ''})")
+                if headlines:
+                    research_text = "Live Indian Tech Headlines:\n" + "\n".join(headlines)
+        except Exception as exc:
+            print(f"[WARN] Tech RSS fallback failed: {exc}")
 
     struct_prompt = f"""
 Create a complete 5-chapter Malayalam YouTube video plan (~8-9 min) for "Gadget Pulse Malayalam" based ONLY on these verified facts:
