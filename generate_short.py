@@ -23,6 +23,8 @@ import re
 import struct
 import subprocess
 import sys
+import time
+import xml.etree.ElementTree as ET
 import urllib.parse
 import wave
 from datetime import datetime, timedelta, timezone
@@ -262,6 +264,26 @@ Find:
                 break
         except Exception as exc:
             print(f"[WARN] Search pass failed on {model_name}: {exc}")
+
+    if not research_notes.strip():
+        # Live Indian tech news RSS fallback if Gemini Search tool hits 429
+        try:
+            rss = requests.get(
+                "https://news.google.com/rss/search?q=India+launch+smartphone+OR+earbuds+OR+laptop+price&hl=en-IN&gl=IN&ceid=IN:en",
+                timeout=15,
+            )
+            if rss.ok:
+                root = ET.fromstring(rss.content)
+                for item in root.findall(".//item")[:10]:
+                    t_el = item.find("title")
+                    l_el = item.find("link")
+                    t_txt = (t_el.text or "").strip() if t_el is not None else ""
+                    l_txt = (l_el.text or "").strip() if l_el is not None else ""
+                    if t_txt and t_txt not in used_topics:
+                        research_notes = f"Live Indian Tech News: {t_txt}\nReference URL: {l_txt}"
+                        break
+        except Exception as exc:
+            print(f"[WARN] Tech RSS fallback failed: {exc}")
 
     if not research_notes.strip():
         fallback_topic = next((t for t in EVERGREEN_TECH_TOPICS if t not in used_topics), EVERGREEN_TECH_TOPICS[0])
