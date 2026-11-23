@@ -49,7 +49,8 @@ GEMINI_MODEL_CANDIDATES = [
     "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
 ]
 
 EVERGREEN_TECH_TOPICS = [
@@ -304,21 +305,28 @@ RULES:
 5. Set 'available_in_india' to True ONLY if the product is currently on sale in India (not rumored/upcoming/general tip).
 """
     last_err = None
-    for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
-        try:
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=script_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=TechShortPlan,
-                    temperature=0.75,
-                ),
-            )
-            return TechShortPlan.model_validate_json(resp.text)
-        except Exception as exc:
-            print(f"[WARN] Script generation failed on {model_name}: {exc}")
-            last_err = exc
+    for attempt in range(3):
+        for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
+            try:
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=script_prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=TechShortPlan,
+                        temperature=0.75,
+                    ),
+                )
+                return TechShortPlan.model_validate_json(resp.text)
+            except Exception as exc:
+                print(f"[WARN] Script generation failed on {model_name} (try {attempt + 1}/3): {exc}")
+                last_err = exc
+                if "503" in str(exc) or "UNAVAILABLE" in str(exc):
+                    time.sleep(6)
+        if attempt < 2:
+            wait_s = 12 * (attempt + 1)
+            print(f"[INFO] Waiting {wait_s}s before retrying Gemini models...")
+            time.sleep(wait_s)
     raise RuntimeError(f"All Gemini models failed: {last_err}")
 
 

@@ -37,7 +37,8 @@ GEMINI_MODEL_CANDIDATES = [
     "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
 ]
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 TTS_VOICE = os.getenv("TTS_VOICE", "ml-IN-MidhunNeural")
@@ -171,17 +172,22 @@ Create a complete 5-chapter Malayalam YouTube video plan (~8-9 min) for "Gadget 
 {research_text}
 Keep Kerala Malayalam warm, conversational, and practical for everyday buyers.
 """
-    for m in [x for x in GEMINI_MODEL_CANDIDATES if x]:
-        try:
-            r = client.models.generate_content(
-                model=m,
-                contents=struct_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=LongTechPlan, temperature=0.7),
-            )
-            plan = LongTechPlan.model_validate_json(r.text)
-            return plan.topic_key, plan
-        except Exception as exc:
-            print(f"[WARN] Struct pass failed on {m}: {exc}")
+    for attempt in range(3):
+        for m in [x for x in GEMINI_MODEL_CANDIDATES if x]:
+            try:
+                r = client.models.generate_content(
+                    model=m,
+                    contents=struct_prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=LongTechPlan, temperature=0.7),
+                )
+                plan = LongTechPlan.model_validate_json(r.text)
+                return plan.topic_key, plan
+            except Exception as exc:
+                print(f"[WARN] Struct pass failed on {m} (try {attempt + 1}/3): {exc}")
+                if "503" in str(exc) or "UNAVAILABLE" in str(exc):
+                    time.sleep(6)
+        if attempt < 2:
+            time.sleep(12 * (attempt + 1))
     raise RuntimeError("All Gemini models failed.")
 
 
