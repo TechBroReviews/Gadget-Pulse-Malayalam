@@ -463,7 +463,7 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
     outro_mp3 = WORK_DIR / "outro.mp3"
     outro_dur = tts_to_mp3(plan.outro_narration_ml, outro_mp3)
     outro_seg = WORK_DIR / "seg_outro.mp4"
-    subprocess.run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(lead_clips[0]), "-i", str(outro_mp3), "-t", f"{outro_dur:.2f}", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(lead_clips[0]), "-i", str(outro_mp3), "-t", f"{outro_dur:.2f}", "-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg)], check=True)
     segments.append(outro_seg)
 
     (WORK_DIR / "fc.txt").write_text("\n".join(f"file '{p.name}'" for p in segments), encoding="utf-8")
