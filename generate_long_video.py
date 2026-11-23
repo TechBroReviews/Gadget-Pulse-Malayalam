@@ -34,11 +34,11 @@ from pydantic import BaseModel, Field
 
 GEMINI_MODEL_CANDIDATES = [
     os.getenv("GEMINI_MODEL", "").strip(),
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-3.8-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
 ]
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 TTS_VOICE = os.getenv("TTS_VOICE", "ml-IN-MidhunNeural")
@@ -184,8 +184,8 @@ Keep Kerala Malayalam warm, conversational, and practical for everyday buyers.
                 return plan.topic_key, plan
             except Exception as exc:
                 print(f"[WARN] Struct pass failed on {m} (try {attempt + 1}/3): {exc}")
-                if "503" in str(exc) or "UNAVAILABLE" in str(exc):
-                    time.sleep(6)
+                if any(k in str(exc) for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+                    time.sleep(10)
         if attempt < 2:
             time.sleep(12 * (attempt + 1))
     raise RuntimeError("All Gemini models failed.")
