@@ -1,1 +1,0 @@
-# Gadget-Pulse-Malayalam
