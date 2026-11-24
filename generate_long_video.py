@@ -339,9 +339,37 @@ def scrape_first_product_image(urls: List[str], out_jpg: Path) -> bool:
     return False
 
 
-def fetch_clip_or_photo(query: str, urls: List[str], out_mp4: Path, out_photo_opt: Optional[Path] = None) -> bool:
+def search_exact_product_image_single(product_name: str, out_jpg: Path) -> bool:
+    if not product_name.strip():
+        return False
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    q = urllib.parse.quote_plus(f"{product_name} official product image")
+    try:
+        r = requests.get(f"https://www.bing.com/images/search?q={q}&qft=+filterui:imagesize-large&form=HDRSC2", headers=headers, timeout=15)
+        if r.ok:
+            urls = re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+)', r.text)
+            for img_url in urls[:8]:
+                if any(b in img_url.lower() for b in ("logo", "favicon", "icon", ".svg")):
+                    continue
+                try:
+                    ir = requests.get(img_url, headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 18000:
+                        out_jpg.write_bytes(ir.content)
+                        with Image.open(out_jpg) as im:
+                            if im.width >= 450 and im.height >= 250:
+                                im.convert("RGB").save(out_jpg, quality=92)
+                                return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def fetch_clip_or_photo(query: str, urls: List[str], out_mp4: Path, out_photo_opt: Optional[Path] = None, product_name: str = "") -> bool:
     photo_tmp = out_photo_opt or out_mp4.with_suffix(".jpg")
-    if urls and scrape_first_product_image(urls, photo_tmp):
+    got_photo = (urls and scrape_first_product_image(urls, photo_tmp)) or (product_name and search_exact_product_image_single(product_name, photo_tmp))
+    if got_photo:
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loop", "1", "-i", str(photo_tmp),
@@ -428,7 +456,7 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
     lead_clips, lead_photo = [], WORK_DIR / "lead_thumb_photo.jpg"
     for idx, ch in enumerate(plan.chapters, start=1):
         c_mp4 = WORK_DIR / f"ch_{idx}_clip_0.mp4"
-        if fetch_clip_or_photo(ch.search_queries[0], ch.official_page_urls, c_mp4, lead_photo if idx == 1 else None):
+        if fetch_clip_or_photo(ch.search_queries[0], ch.official_page_urls, c_mp4, lead_photo if idx == 1 else None, product_name=ch.product_name):
             lead_clips.append(c_mp4)
     if not lead_clips:
         c_mp4 = WORK_DIR / "fallback.mp4"
@@ -600,7 +628,13 @@ def upload_long_to_facebook(video_path: Path, title: str, description: str) -> N
 
     base_url = f"https://graph-video.facebook.com/{GRAPH_API_VERSION}/{page_id}/videos"
     fsize = video_path.stat().st_size
-    s_data = requests.post(base_url, data={"upload_phase": "start", "file_size": str(fsize), "access_token": token}, timeout=60).json()
+    s_resp = requests.post(base_url, data={"upload_phase": "start", "file_size": str(fsize), "access_token": token}, timeout=60)
+    if not s_resp.ok:
+        print(f"[ERROR] Facebook Video start HTTP {s_resp.status_code}: {s_resp.text}")
+        s_resp.raise_for_status()
+    s_data = s_resp.json()
+    if "upload_session_id" not in s_data:
+        raise RuntimeError(f"Facebook Video start missing upload_session_id: {s_data}")
     session_id = s_data["upload_session_id"]
     start_off, end_off = int(s_data["start_offset"]), int(s_data["end_offset"])
     with open(video_path, "rb") as vf:

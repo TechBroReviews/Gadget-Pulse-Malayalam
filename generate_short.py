@@ -333,6 +333,43 @@ RULES:
 # ---------------------------------------------------------------------------
 # Step 2: Official Product Photo Scraper + Tag-Filtered Stock Clips
 # ---------------------------------------------------------------------------
+def search_exact_product_images(product_name: str, out_dir: Path, max_images: int = 3) -> List[Path]:
+    """Searches public web images for the exact device name (e.g. 'Nothing Phone 3a') when launch URLs fail."""
+    saved: List[Path] = []
+    if not product_name.strip():
+        return saved
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    q = urllib.parse.quote_plus(f"{product_name} official product image")
+    try:
+        r = requests.get(f"https://www.bing.com/images/search?q={q}&qft=+filterui:imagesize-large&form=HDRSC2", headers=headers, timeout=15)
+        if r.ok:
+            # Bing embeds direct image URLs as murl&quot;:&quot;https://...&quot; or "murl":"https://..."
+            urls = re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+)', r.text)
+            for idx, img_url in enumerate(urls[:12]):
+                if len(saved) >= max_images:
+                    break
+                if any(b in img_url.lower() for b in ("logo", "favicon", "avatar", "icon", ".svg", "placeholder")):
+                    continue
+                try:
+                    ir = requests.get(img_url, headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 18000:
+                        out_img = out_dir / f"exact_prod_{len(saved)}.jpg"
+                        out_img.write_bytes(ir.content)
+                        with Image.open(out_img) as im:
+                            if im.width >= 450 and im.height >= 300:
+                                im.convert("RGB").save(out_img, quality=92)
+                                saved.append(out_img)
+                                print(f"[INFO] Fetched exact product photo via web search: {img_url[:80]}")
+                except Exception:
+                    continue
+    except Exception as exc:
+        print(f"[WARN] Exact product image search failed for '{product_name}': {exc}")
+    return saved
+
+
 def scrape_official_product_images(urls: List[str], out_dir: Path, max_images: int = 3) -> List[Path]:
     """Extracts og:image / twitter:image / large product photos from official launch pages."""
     saved: List[Path] = []
@@ -405,8 +442,13 @@ def gather_tech_visual_clips(plan: TechShortPlan, out_dir: Path) -> Tuple[List[P
     clips: List[Path] = []
     lead_photo: Optional[Path] = None
 
-    if plan.is_specific_product and plan.product_page_urls:
-        prod_imgs = scrape_official_product_images(plan.product_page_urls, out_dir, max_images=3)
+    if plan.is_specific_product:
+        prod_imgs: List[Path] = []
+        if plan.product_page_urls:
+            prod_imgs.extend(scrape_official_product_images(plan.product_page_urls, out_dir, max_images=3))
+        if len(prod_imgs) < 2:
+            needed = 3 - len(prod_imgs)
+            prod_imgs.extend(search_exact_product_images(plan.product_name, out_dir, max_images=needed))
         if prod_imgs:
             lead_photo = prod_imgs[0]
             for idx, p_img in enumerate(prod_imgs):
@@ -415,7 +457,8 @@ def gather_tech_visual_clips(plan: TechShortPlan, out_dir: Path) -> Tuple[List[P
                 clips.append(c_mp4)
 
     pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
-    if pixabay_key and len(clips) < 4:
+    # Only pull generic Pixabay stock if we don't already have >=2 exact product photos
+    if pixabay_key and len(clips) < (2 if plan.is_specific_product else 4):
         for idx, query in enumerate(plan.search_queries):
             if len(clips) >= 4:
                 break
@@ -896,7 +939,9 @@ def upload_to_instagram_reels(caption: str) -> None:
     if thumb_url:
         payload["cover_url"] = thumb_url
     init_resp = requests.post(f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media", data=payload, timeout=30)
-    init_resp.raise_for_status()
+    if not init_resp.ok:
+        print(f"[ERROR] Instagram init HTTP {init_resp.status_code}: {init_resp.text}")
+        init_resp.raise_for_status()
     cid = init_resp.json()["id"]
 
     for _ in range(20):
@@ -927,7 +972,13 @@ def upload_to_facebook_reels(video_path: Path, title: str, description: str) -> 
 
     vbytes = video_path.read_bytes()
     start_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{fb_page_id}/video_reels"
-    s_data = requests.post(start_url, data={"upload_phase": "start", "access_token": access_token}, timeout=30).json()
+    s_resp = requests.post(start_url, data={"upload_phase": "start", "access_token": access_token}, timeout=30)
+    if not s_resp.ok:
+        print(f"[ERROR] Facebook Reels start HTTP {s_resp.status_code}: {s_resp.text}")
+        s_resp.raise_for_status()
+    s_data = s_resp.json()
+    if "video_id" not in s_data:
+        raise RuntimeError(f"Facebook Reels start missing video_id: {s_data}")
     vid = s_data["video_id"]
     up_url = s_data.get("upload_url", f"https://rupload.facebook.com/video-upload/{GRAPH_API_VERSION}/{vid}")
     requests.post(
