@@ -71,8 +71,8 @@ OUTRO_YT_LINK_ML = (
     "കൂടുതൽ ടെക് അപ്ഡേറ്റുകൾക്കായി ഗാഡ്ജറ്റ് പൾസ് മലയാളം സബ്സ്ക്രൈബ് ചെയ്യൂ."
 )
 OUTRO_META_LINK_ML = (
-    "ഈ പ്രോഡക്റ്റിന്റെ ബെസ്റ്റ് ബൈ ലിങ്ക് വേണമെങ്കിൽ താഴെ LINK എന്ന് കമന്റ് ചെയ്യൂ, "
-    "നിങ്ങളുടെ ഡിഎമ്മിൽ ഉടൻ ലിങ്ക് എത്തും. ഗാഡ്ജറ്റ് പൾസ് മലയാളം ഫോളോ ചെയ്യാൻ മറക്കല്ലേ."
+    "ഈ പ്രോഡക്റ്റിന്റെ ബെസ്റ്റ് ബൈ ലിങ്ക് താഴെ ക്യാപ്ഷനിലും കമന്റിലും നൽകിയിട്ടുണ്ട്. "
+    "കൂടുതൽ ടെക് അപ്ഡേറ്റുകൾക്കായി ഗാഡ്ജറ്റ് പൾസ് മലയാളം ഫോളോ ചെയ്യാൻ മറക്കല്ലേ."
 )
 
 WATERMARK_TEXT = "Gadget Pulse Malayalam"
@@ -107,7 +107,7 @@ class TechShortPlan(BaseModel):
     thumbnail_question_ml: str = Field(description="Punchy 3-to-5 word Malayalam curiosity hook for the thumbnail.")
     description: str = Field(description="Engaging Malayalam + English YouTube description + 5-8 hashtags.")
     reels_caption_ml: str = Field(
-        description="Instagram & Facebook Reels caption in Malayalam + English (mention 'Comment LINK' if available_in_india=True) + 10-12 hashtags including #GadgetPulseMalayalam #MalayalamTech #KeralaTech."
+        description="Instagram & Facebook Reels caption in Malayalam + English (do NOT ask users to comment LINK for DM) + 10-12 hashtags including #GadgetPulseMalayalam #MalayalamTech #KeralaTech."
     )
     tags: List[str] = Field(description="6 to 10 relevant Malayalam and English SEO keywords without #.")
     narration_malayalam: str = Field(
@@ -413,21 +413,106 @@ def scrape_official_product_images(urls: List[str], out_dir: Path, max_images: i
     return saved
 
 
-def image_to_ken_burns_clip(img_path: Path, out_mp4: Path, duration_sec: float = 6.0) -> None:
-    frames = max(90, int(duration_sec * 30))
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-loop", "1", "-i", str(img_path),
-            "-vf", (
-                f"scale=1200:1400:force_original_aspect_ratio=increase,crop=1080:1240,"
-                f"zoompan=z='min(zoom+0.0014,1.14)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1240,fps=30,format=yuv420p"
-            ),
-            "-t", f"{duration_sec:.2f}", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(out_mp4),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def image_to_ken_burns_clip(img_path: Path, out_mp4: Path, duration_sec: float = 3.5, style_idx: int = 0) -> None:
+    """Renders dynamic 1080x1920 30fps product photo animations: fly-in, bounce-zoom, float, and swipe-out."""
+    fps = 30
+    total_frames = max(60, int(round(duration_sec * fps)))
+    W, H = 1080, 1920
+    cx, cy = 540, 840  # Center stage (safely between header and subtitles)
+
+    # Pre-render dark tech grid background
+    bg = Image.new("RGB", (W, H), (9, 16, 34))
+    bg_d = ImageDraw.Draw(bg)
+    for gx in range(0, W, 90):
+        bg_d.line([(gx, 0), (gx, H)], fill=(16, 28, 56), width=2)
+    for gy in range(0, H, 90):
+        bg_d.line([(0, gy), (W, gy)], fill=(16, 28, 56), width=2)
+
+    prod = Image.open(img_path).convert("RGB")
+    prod = ImageEnhance.Color(prod).enhance(1.18)
+    prod = ImageEnhance.Contrast(prod).enhance(1.10)
+    # Fit product nicely into a 860x860 card base
+    base_scale = min(860 / prod.width, 860 / prod.height)
+    bw, bh = max(200, int(prod.width * base_scale)), max(200, int(prod.height * base_scale))
+    prod_base = prod.resize((bw, bh), Image.Resampling.LANCZOS)
+
+    accent = (0, 229, 255) if style_idx % 2 == 0 else (250, 204, 21)
+    mode = style_idx % 4
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+    try:
+        for f in range(total_frames):
+            p = f / max(1, total_frames - 1)
+            t = f / fps
+            frame = bg.copy()
+            d = ImageDraw.Draw(frame)
+
+            # Pulsing neon tech ring behind the product
+            ring_r = 350 + int(20 * math.sin(t * 4.0))
+            d.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r], outline=accent, width=3)
+
+            # Entry (0..0.20) -> Dynamic Showcase (0.20..0.82) -> Fast Swipe-Out (0.82..1.0)
+            dx, dy, scale_f = 0, 0, 1.0
+            if p < 0.20:
+                ep = 1.0 - (1.0 - p / 0.20) ** 3
+                if mode == 0:  # Fly in from right
+                    dx = int((1.0 - ep) * 950)
+                    scale_f = 0.85 + 0.15 * ep
+                elif mode == 1:  # Pop up from bottom with overshoot
+                    dy = int((1.0 - ep) * 700)
+                    scale_f = 0.65 + 0.35 * ep
+                elif mode == 2:  # Fly in from left
+                    dx = int(-(1.0 - ep) * 950)
+                    scale_f = 0.85 + 0.15 * ep
+                else:  # Zoom-punch in from center
+                    scale_f = 0.40 + 0.60 * ep
+            elif p > 0.82:
+                sp = ((p - 0.82) / 0.18) ** 2
+                if mode in (0, 3):  # Fast swipe out left
+                    dx = int(-sp * 1150)
+                    scale_f = 1.06 - 0.12 * sp
+                else:  # Fast swipe out right
+                    dx = int(sp * 1150)
+                    scale_f = 1.06 - 0.12 * sp
+            else:
+                mid_p = (p - 0.20) / 0.62
+                if mode in (0, 2):  # Smooth zoom-in + gentle float
+                    scale_f = 1.0 + 0.10 * mid_p
+                    dy = int(16 * math.sin(t * 3.2))
+                elif mode == 1:  # Pulse zoom
+                    scale_f = 1.0 + 0.08 * math.sin(mid_p * math.pi)
+                    dx = int(18 * math.sin(t * 2.5))
+                else:  # Slow close-up zoom + pan
+                    scale_f = 1.04 + 0.10 * mid_p
+                    dx = int(-24 + 48 * mid_p)
+
+            nw = max(120, int(bw * scale_f))
+            nh = max(120, int(bh * scale_f))
+            p_resized = prod_base.resize((nw, nh), Image.Resampling.BILINEAR)
+
+            px = cx + dx - nw // 2
+            py = cy + dy - nh // 2
+            # Card backing + neon border around product photo
+            pad = 14
+            d.rounded_rectangle(
+                [px - pad, py - pad, px + nw + pad, py + nh + pad],
+                radius=28,
+                fill=(18, 30, 58),
+                outline=accent,
+                width=5,
+            )
+            frame.paste(p_resized, (px, py))
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("Dynamic product photo animation failed")
 
 
 def _query_matches_tags(query: str, tags_str: str) -> bool:
@@ -446,19 +531,19 @@ def gather_tech_visual_clips(plan: TechShortPlan, out_dir: Path) -> Tuple[List[P
         prod_imgs: List[Path] = []
         if plan.product_page_urls:
             prod_imgs.extend(scrape_official_product_images(plan.product_page_urls, out_dir, max_images=3))
-        if len(prod_imgs) < 2:
-            needed = 3 - len(prod_imgs)
+        if len(prod_imgs) < 6:
+            needed = 6 - len(prod_imgs)
             prod_imgs.extend(search_exact_product_images(plan.product_name, out_dir, max_images=needed))
         if prod_imgs:
             lead_photo = prod_imgs[0]
             for idx, p_img in enumerate(prod_imgs):
                 c_mp4 = out_dir / f"prod_clip_{idx}.mp4"
-                image_to_ken_burns_clip(p_img, c_mp4, duration_sec=6.0)
+                image_to_ken_burns_clip(p_img, c_mp4, duration_sec=3.8, style_idx=idx)
                 clips.append(c_mp4)
 
     pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
     # Only pull generic Pixabay stock if we don't already have >=2 exact product photos
-    if pixabay_key and len(clips) < (2 if plan.is_specific_product else 4):
+    if pixabay_key and len(clips) < (3 if plan.is_specific_product else 5):
         for idx, query in enumerate(plan.search_queries):
             if len(clips) >= 4:
                 break
@@ -741,11 +826,20 @@ def assemble_dual_outro_shorts(
     norm_clips: List[Path] = []
     for idx, c in enumerate(clips):
         n_mp4 = WORK_DIR / f"norm_{idx}.mp4"
+        if c.name.startswith("prod_clip_"):
+            subprocess.run(
+                ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(c), "-t", f"{seg_dur:.2f}", "-vf", "setsar=1,fps=30,format=yuv420p", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(n_mp4)],
+                check=True,
+            )
+            norm_clips.append(n_mp4)
+            if idx == 0:
+                norm_clips.append(spec_card_mp4)
+            continue
         vf = (
             "[0:v]split=2[bg][fg];"
             "[bg]scale=135:240:force_original_aspect_ratio=increase,crop=135:240,boxblur=4:1,scale=1080:1920,eq=brightness=-0.15[bg_blur];"
             "[fg]scale=1080:1240:force_original_aspect_ratio=decrease[fg_fit];"
-            "[bg_blur][fg_fit]overlay=(W-w)/2:(H-h)/2-40,fps=30,format=yuv420p[out]"
+            "[bg_blur][fg_fit]overlay=(W-w)/2:(H-h)/2-40,setsar=1,fps=30,format=yuv420p[out]"
         )
         subprocess.run(
             ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(c), "-t", f"{seg_dur:.2f}", "-filter_complex", vf, "-map", "[out]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(n_mp4)],
@@ -818,7 +912,7 @@ def assemble_dual_outro_shorts(
                 "-filter_complex",
                 "[0:v]split=2[bg][fg];[bg]scale=135:240:force_original_aspect_ratio=increase,crop=135:240,boxblur=4:1,scale=1080:1920,eq=brightness=-0.15[bg_b];"
                 "[fg]scale=1080:1240:force_original_aspect_ratio=decrease[fg_f];[bg_b][fg_f]overlay=(W-w)/2:(H-h)/2-40[base];"
-                "[base][2:v]overlay=0:90,fps=30,format=yuv420p[vout]",
+                "[base][2:v]overlay=0:90,setsar=1,fps=30,format=yuv420p[vout]",
                 "-map", "[vout]", "-map", "1:a:0",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
                 "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg),
@@ -830,7 +924,7 @@ def assemble_dual_outro_shorts(
         subprocess.run(
             [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(clist),
-                "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-movflags", "+faststart", str(target_mp4),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-movflags", "+faststart", str(target_mp4),
             ],
             check=True,
         )
@@ -860,6 +954,28 @@ def build_affiliate_links_block(plan: TechShortPlan) -> str:
         lines.append(f"• Flipkart: https://www.flipkart.com/search?q={q}")
     return "\n".join(lines) + "\n"
 
+
+
+def post_first_comment_safe(youtube, video_id: str, comment_text: str) -> None:
+    if not comment_text.strip():
+        return
+    try:
+        youtube.commentThreads().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {
+                        "snippet": {
+                            "textOriginal": comment_text.strip(),
+                        }
+                    },
+                }
+            },
+        ).execute()
+        print("[SUCCESS] Posted affiliate first comment on YouTube video!")
+    except Exception as exc:
+        print(f"[INFO] YouTube first comment skipped: {exc}")
 
 def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: TechShortPlan) -> str:
     youtube = get_youtube_service()
@@ -922,6 +1038,10 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: TechShortPlan) ->
         youtube.playlistItems().insert(part="snippet", body={"snippet": {"playlistId": pl_id, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
     except Exception as exc:
         print(f"[INFO] Playlist skipped: {exc}")
+
+    aff_block = build_affiliate_links_block(plan).strip()
+    if aff_block:
+        post_first_comment_safe(youtube, video_id, f"{plan.product_name} ({plan.price_inr_label})\n{aff_block}")
 
     return video_id
 

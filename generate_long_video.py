@@ -366,20 +366,72 @@ def search_exact_product_image_single(product_name: str, out_jpg: Path) -> bool:
     return False
 
 
+def render_dynamic_product_16x9(img_path: Path, out_mp4: Path, duration_sec: float = 6.0, style_idx: int = 0) -> None:
+    """Renders 1920x1080 30fps dynamic fly-in + zoom + swipe-out animation for product photos."""
+    fps = 30
+    total_frames = max(60, int(round(duration_sec * fps)))
+    W, H = 1920, 1080
+    cx, cy = 960, 445  # Upper-center stage cleanly above lower-third callout box
+    bg = Image.new("RGB", (W, H), (9, 16, 34))
+    bg_d = ImageDraw.Draw(bg)
+    for gx in range(0, W, 120):
+        bg_d.line([(gx, 0), (gx, H)], fill=(16, 28, 56), width=2)
+    for gy in range(0, H, 120):
+        bg_d.line([(0, gy), (W, gy)], fill=(16, 28, 56), width=2)
+
+    prod = ImageEnhance.Color(Image.open(img_path).convert("RGB")).enhance(1.18)
+    base_scale = min(980 / prod.width, 620 / prod.height)
+    bw, bh = max(240, int(prod.width * base_scale)), max(200, int(prod.height * base_scale))
+    prod_base = prod.resize((bw, bh), Image.Resampling.LANCZOS)
+    accent = (0, 229, 255) if style_idx % 2 == 0 else (250, 204, 21)
+    mode = style_idx % 4
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+    try:
+        for f in range(total_frames):
+            p = f / max(1, total_frames - 1)
+            t = f / fps
+            frame = bg.copy()
+            d = ImageDraw.Draw(frame)
+            ring_r = 280 + int(16 * math.sin(t * 3.5))
+            d.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r], outline=accent, width=3)
+
+            dx, dy, scale_f = 0, 0, 1.0
+            if p < 0.16:
+                ep = 1.0 - (1.0 - p / 0.16) ** 3
+                dx = int((1.0 - ep) * (1200 if mode % 2 == 0 else -1200))
+                scale_f = 0.85 + 0.15 * ep
+            elif p > 0.85:
+                sp = ((p - 0.85) / 0.15) ** 2
+                dx = int((-1300 if mode % 2 == 0 else 1300) * sp)
+            else:
+                mid_p = (p - 0.16) / 0.69
+                scale_f = 1.0 + 0.10 * mid_p
+                dy = int(12 * math.sin(t * 3.0))
+
+            nw, nh = max(140, int(bw * scale_f)), max(120, int(bh * scale_f))
+            p_res = prod_base.resize((nw, nh), Image.Resampling.BILINEAR)
+            px, py = cx + dx - nw // 2, cy + dy - nh // 2
+            d.rounded_rectangle([px - 14, py - 14, px + nw + 14, py + nh + 14], radius=24, fill=(18, 30, 58), outline=accent, width=4)
+            frame.paste(p_res, (px, py))
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("16:9 dynamic product animation failed")
+
+
 def fetch_clip_or_photo(query: str, urls: List[str], out_mp4: Path, out_photo_opt: Optional[Path] = None, product_name: str = "") -> bool:
     photo_tmp = out_photo_opt or out_mp4.with_suffix(".jpg")
     got_photo = (urls and scrape_first_product_image(urls, photo_tmp)) or (product_name and search_exact_product_image_single(product_name, photo_tmp))
     if got_photo:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loop", "1", "-i", str(photo_tmp),
-                "-vf", "scale=2160:1215:force_original_aspect_ratio=increase,crop=2160:1215,zoompan=z='min(zoom+0.0012,1.15)':d=240:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,fps=30,format=yuv420p",
-                "-t", "8", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(out_mp4),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        render_dynamic_product_16x9(photo_tmp, out_mp4, duration_sec=6.0, style_idx=abs(hash(product_name or query)) % 4)
         return True
 
     if PIXABAY_API_KEY:
@@ -552,6 +604,28 @@ def build_affiliate_desc(plan: LongTechPlan) -> str:
     return ("\n".join(lines) + "\n") if added else ""
 
 
+
+def post_first_comment_safe(youtube, video_id: str, comment_text: str) -> None:
+    if not comment_text.strip():
+        return
+    try:
+        youtube.commentThreads().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {
+                        "snippet": {
+                            "textOriginal": comment_text.strip(),
+                        }
+                    },
+                }
+            },
+        ).execute()
+        print("[SUCCESS] Posted affiliate first comment on YouTube video!")
+    except Exception as exc:
+        print(f"[INFO] YouTube first comment skipped: {exc}")
+
 def upload_long_to_youtube(video_path: Path, thumb_jpg: Path, plan: LongTechPlan, chapters_text: str, category: str) -> str:
     creds = Credentials(
         token=None,
@@ -611,6 +685,9 @@ def upload_long_to_youtube(video_path: Path, thumb_jpg: Path, plan: LongTechPlan
         yt.playlistItems().insert(part="snippet", body={"snippet": {"playlistId": pl_id, "resourceId": {"kind": "youtube#video", "videoId": vid}}}).execute()
     except Exception as exc:
         print(f"[INFO] Playlist skipped: {exc}")
+    aff_block = build_affiliate_desc(plan).strip()
+    if aff_block:
+        post_first_comment_safe(yt, vid, aff_block)
     return vid
 
 
