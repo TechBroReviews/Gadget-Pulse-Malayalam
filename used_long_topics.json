@@ -1,11 +1,17 @@
 {
   "topics": [
-    "top_5_useful_everyday_gadgets_2024"
+    "top_5_useful_everyday_gadgets_2024",
+    "smart_tv_and_device_trends_india_2024"
   ],
   "episodes": [
     {
       "id": "4j0kYouuUyk",
       "title": "നിത്യജീവിതത്തിന് ഉപകാരപ്പെടുന്ന 5 Gadgets | Top 5 Everyday Useful Tech 2024",
+      "category": "top5_budget"
+    },
+    {
+      "id": "usoDLb17Gck",
+      "title": "ഇന്ത്യയിലെ സ്മാർട്ട് ടിവി വിപണി മാറുന്നു! പുതിയ ഗാഡ്ജറ്റ് വിശേഷങ്ങൾ | Gadget Pulse",
       "category": "top5_budget"
     }
   ]
