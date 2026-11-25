@@ -684,6 +684,91 @@ def parse_coalesced_srt(srt_path: Path, max_words: int = 8) -> List[Tuple[float,
     return merged
 
 
+
+def render_karaoke_subtitle_mov(
+    cues: List[Tuple[float, float, str]],
+    total_duration: float,
+    out_mov: Path,
+    font_path: str,
+) -> None:
+    """Renders SpendWise-style Karaoke word-by-word yellow pill highlighted subtitles on transparent .mov."""
+    W, H, fps = 1080, 1920, 30
+    total_frames = max(1, int(round(total_duration * fps)))
+    lat_path = find_latin_font()
+    ml_f = ImageFont.truetype(font_path, 40)
+    lat_f = ImageFont.truetype(lat_path, 40)
+    dummy_d = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+
+    cue_layouts = []
+    for st, en, txt in cues:
+        lines = wrap_mixed_text_px(dummy_d, txt, ml_f, lat_f, 860)[:3]
+        words_flat = [w for ln in lines for w in ln.split()]
+        cue_layouts.append((st, en, lines, max(1, len(words_flat))))
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgba", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "qtrle", str(out_mov),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+    try:
+        cue_idx = 0
+        for f in range(total_frames):
+            t = f / fps
+            frame = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(frame)
+            while cue_idx < len(cue_layouts) and t > cue_layouts[cue_idx][1]:
+                cue_idx += 1
+            if cue_idx < len(cue_layouts):
+                st, en, lines, n_words = cue_layouts[cue_idx]
+                if st <= t <= en:
+                    dur = max(0.2, en - st)
+                    active_word_idx = min(n_words - 1, int(((t - st) / dur) * n_words))
+                    max_lw = max(measure_mixed_width(d, ln, ml_f, lat_f) for ln in lines)
+                    line_h = 56
+                    box_w = min(980, int(max_lw) + 76)
+                    box_h = len(lines) * line_h + 36
+                    x0 = (W - box_w) // 2
+                    y0 = 1520 - box_h // 2
+                    d.rounded_rectangle(
+                        [x0, y0, x0 + box_w, y0 + box_h],
+                        radius=26,
+                        fill=(10, 16, 34, 228),
+                        outline=(0, 229, 255, 220),
+                        width=3,
+                    )
+                    cur_y = y0 + 42
+                    w_counter = 0
+                    space_w = d.textlength(" ", font=ml_f)
+                    for ln in lines:
+                        lw = measure_mixed_width(d, ln, ml_f, lat_f)
+                        cur_x = (W - lw) / 2.0
+                        for w in ln.split():
+                            ww = measure_mixed_width(d, w, ml_f, lat_f)
+                            if w_counter == active_word_idx:
+                                d.rounded_rectangle(
+                                    [cur_x - 8, cur_y - 24, cur_x + ww + 8, cur_y + 24],
+                                    radius=12,
+                                    fill=(250, 204, 21, 255),
+                                )
+                                txt_col = (10, 16, 34, 255)
+                            else:
+                                txt_col = (255, 255, 255, 255)
+                            for seg, is_lat in _split_script_runs(w):
+                                fnt = lat_f if is_lat else ml_f
+                                d.text((cur_x, cur_y), seg, font=fnt, fill=txt_col, anchor="lm")
+                                cur_x += d.textlength(seg, font=fnt)
+                            cur_x += space_w
+                            w_counter += 1
+                        cur_y += line_h
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("Karaoke subtitle render failed")
+
+
 def render_2d_spec_card_clip(plan: TechShortPlan, duration_sec: float, out_mp4: Path, font_path: str) -> None:
     """Renders a sleek 1080x1920 2D animated Tech Spec Card in the center stage (y=390..1280)."""
     fps = 30
@@ -877,20 +962,15 @@ def assemble_dual_outro_shorts(
     render_overlay_box(plan.hook_headline_ml, header_png, font_path, is_header=True)
     cues = parse_coalesced_srt(main_srt)
 
-    cmd_inputs = ["-i", str(merged_bg), "-i", str(mixed_main_wav), "-i", str(header_png)]
-    filters = ["[0:v][2:v]overlay=0:90[vhead]"]
-    last_lbl = "[vhead]"
-    for idx, (st, en, txt) in enumerate(cues):
-        spng = WORK_DIR / f"sub_{idx}.png"
-        render_overlay_box(txt, spng, font_path, is_header=False)
-        cmd_inputs.extend(["-i", str(spng)])
-        out_lbl = f"[v{idx}]"
-        filters.append(f"{last_lbl}[{idx + 3}:v]overlay=0:1390:enable='between(t,{st:.2f},{en:.2f})'{out_lbl}")
-        last_lbl = out_lbl
-
-    filters.append(
-        f"{last_lbl}drawtext=text='{WATERMARK_TEXT}':fontsize=32:fontcolor=white@0.5:shadowcolor=black@0.25:shadowx=2:shadowy=2:x=48:y=40[vout]"
-    )
+    karaoke_mov = WORK_DIR / "karaoke_sub.mov"
+    main_dur = get_media_duration(mixed_main_wav)
+    render_karaoke_subtitle_mov(cues, main_dur, karaoke_mov, font_path)
+    cmd_inputs = ["-i", str(merged_bg), "-i", str(mixed_main_wav), "-i", str(header_png), "-i", str(karaoke_mov)]
+    filters = [
+        "[0:v][2:v]overlay=0:90[vhead]",
+        "[vhead][3:v]overlay=0:0[vsub]",
+        f"[vsub]drawtext=text='{WATERMARK_TEXT}':fontsize=32:fontcolor=white@0.5:shadowcolor=black@0.25:shadowx=2:shadowy=2:x=48:y=40[vout]",
+    ]
     main_body_mp4 = WORK_DIR / "main_body.mp4"
     subprocess.run(
         [

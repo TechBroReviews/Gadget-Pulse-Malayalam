@@ -493,8 +493,78 @@ def render_thumbnail_16x9(subject_jpg: Optional[Path], fallback_clip: Path, hook
 # ---------------------------------------------------------------------------
 # Video Build & Publishing
 # ---------------------------------------------------------------------------
-def tts_to_mp3(text: str, out_mp3: Path) -> float:
-    subprocess.run(["edge-tts", "--voice", TTS_VOICE, "--rate=-3%", "--pitch=-1Hz", "--text", text, "--write-media", str(out_mp3)], check=True)
+
+def _srt_ts_to_sec(ts: str) -> float:
+    ts = ts.strip().replace(",", ".")
+    parts = ts.split(":")
+    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+
+
+def _sec_to_ass_ts(sec: float) -> str:
+    sec = max(0.0, sec)
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = sec % 60
+    return f"{h}:{m:02d}:{s:05.2f}"
+
+
+def srt_to_karaoke_ass(srt_path: Path, ass_path: Path) -> None:
+    """Converts edge-tts SRT into 1080p bottom ASS Karaoke subtitles with yellow word sweep."""
+    raw = srt_path.read_text(encoding="utf-8", errors="ignore").strip() if srt_path.exists() else ""
+    cues: List[Tuple[float, float, str]] = []
+    for block in re.split(r"\r?\n\s*\r?\n", raw):
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        if len(lines) >= 3 and "-->" in lines[1]:
+            s_t, e_t = [x.strip() for x in lines[1].split("-->")[:2]]
+            cues.append((_srt_ts_to_sec(s_t), _srt_ts_to_sec(e_t), " ".join(lines[2:])))
+    # Merge short word cues into readable 5-7 word phrases
+    merged: List[Tuple[float, float, str]] = []
+    buf_w: List[str] = []
+    b_s, b_e = 0.0, 0.0
+    for st, en, txt in cues:
+        words = txt.split()
+        if not buf_w:
+            b_s = st
+        if len(buf_w) + len(words) > 6:
+            merged.append((b_s, b_e, " ".join(buf_w)))
+            buf_w = list(words)
+            b_s, b_e = st, en
+        else:
+            buf_w.extend(words)
+            b_e = en
+    if buf_w:
+        merged.append((b_s, b_e, " ".join(buf_w)))
+
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,Noto Sans Malayalam,50,&H0015CCFA,&H00FFFFFF,&H0022100A,&HD822100A,-1,0,0,0,100,100,0,0,3,12,0,2,120,120,52,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    ev_lines = []
+    for st, en, txt in merged:
+        dur_cs = max(20, int(round((en - st) * 100)))
+        words = txt.split()
+        if not words:
+            continue
+        per_cs = max(8, dur_cs // len(words))
+        k_txt = " ".join(f"{{\\kf{per_cs}}}{w}" for w in words)
+        ev_lines.append(f"Dialogue: 0,{_sec_to_ass_ts(st)},{_sec_to_ass_ts(en)},Karaoke,,0,0,0,,{k_txt}")
+    ass_path.write_text(header + "\n".join(ev_lines) + "\n", encoding="utf-8")
+
+
+def tts_to_mp3(text: str, out_mp3: Path, out_srt: Optional[Path] = None) -> float:
+    cmd = ["edge-tts", "--voice", TTS_VOICE, "--rate=-3%", "--pitch=-1Hz", "--text", text, "--write-media", str(out_mp3)]
+    if out_srt is not None:
+        cmd.extend(["--write-subtitles", str(out_srt)])
+    subprocess.run(cmd, check=True)
     return float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(out_mp3)], text=True).strip())
 
 
@@ -542,7 +612,10 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
         elapsed += 2.5
 
         ch_mp3 = WORK_DIR / f"ch_{idx}.mp3"
-        ch_dur = tts_to_mp3(ch.narration_ml, ch_mp3)
+        ch_srt = WORK_DIR / f"ch_{idx}.srt"
+        ch_ass = WORK_DIR / f"ch_{idx}.ass"
+        ch_dur = tts_to_mp3(ch.narration_ml, ch_mp3, ch_srt)
+        srt_to_karaoke_ass(ch_srt, ch_ass)
         ch_clips = [WORK_DIR / f"ch_{idx}_clip_0.mp4"] if (WORK_DIR / f"ch_{idx}_clip_0.mp4").exists() else []
         for q_i, q in enumerate(ch.search_queries[1:3], start=1):
             cp = WORK_DIR / f"ch_{idx}_clip_{q_i}.mp4"
@@ -563,7 +636,7 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
         ov_png = WORK_DIR / f"ov_{idx}.png"
         render_callout_overlay(ch, ov_png, font_path)
         ch_seg = WORK_DIR / f"seg_ch_{idx}.mp4"
-        subprocess.run(["ffmpeg", "-y", "-i", str(WORK_DIR / f"craw_{idx}.mp4"), "-i", str(ch_mp3), "-i", str(ov_png), "-filter_complex", "[0:v][2:v]overlay=0:0[vout]", "-map", "[vout]", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(ch_seg)], check=True)
+        subprocess.run(["ffmpeg", "-y", "-i", str(WORK_DIR / f"craw_{idx}.mp4"), "-i", str(ch_mp3), "-i", str(ov_png), "-filter_complex", f"[0:v][2:v]overlay=0:0,ass={ch_ass.as_posix()}[vout]", "-map", "[vout]", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(ch_seg)], check=True)
         segments.append(ch_seg)
         elapsed += ch_dur
 
