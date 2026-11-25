@@ -1046,7 +1046,7 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: TechShortPlan) ->
     return video_id
 
 
-def upload_to_instagram_reels(caption: str) -> None:
+def upload_to_instagram_reels(caption: str, comment_text: str = "") -> None:
     access_token = os.getenv("META_ACCESS_TOKEN", "").strip()
     ig_user_id = os.getenv("IG_USER_ID", "").strip()
     video_url = os.getenv("IG_PUBLIC_VIDEO_URL", "").strip()
@@ -1074,10 +1074,24 @@ def upload_to_instagram_reels(caption: str) -> None:
 
     pub = requests.post(f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media_publish", data={"creation_id": cid, "access_token": access_token}, timeout=30)
     pub.raise_for_status()
-    print(f"[SUCCESS] Published Instagram Reel! ID: {pub.json().get('id')}")
+    ig_media_id = pub.json().get("id")
+    print(f"[SUCCESS] Published Instagram Reel! ID: {ig_media_id}")
+    if ig_media_id and comment_text.strip():
+        try:
+            c_resp = requests.post(
+                f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_media_id}/comments",
+                data={"message": comment_text.strip(), "access_token": access_token},
+                timeout=20,
+            )
+            if c_resp.ok:
+                print("[SUCCESS] Posted affiliate comment on Instagram Reel!")
+            else:
+                print(f"[INFO] Instagram comment skipped (HTTP {c_resp.status_code}): {c_resp.text[:160]}")
+        except Exception as exc:
+            print(f"[INFO] Instagram comment skipped: {exc}")
 
 
-def upload_to_facebook_reels(video_path: Path, title: str, description: str) -> None:
+def upload_to_facebook_reels(video_path: Path, title: str, description: str, comment_text: str = "") -> None:
     access_token = os.getenv("META_ACCESS_TOKEN", "").strip()
     fb_page_id = os.getenv("FB_PAGE_ID", "").strip()
     if not (access_token and fb_page_id):
@@ -1107,16 +1121,39 @@ def upload_to_facebook_reels(video_path: Path, title: str, description: str) -> 
         data=vbytes,
         timeout=180,
     ).raise_for_status()
-    requests.post(
-        start_url,
-        data={"upload_phase": "finish", "video_id": vid, "video_state": "PUBLISHED", "description": description, "title": title[:100], "access_token": access_token},
-        timeout=30,
-    ).raise_for_status()
+    ist_now = datetime.now(IST_TZ)
+    target_ist = ist_now.replace(hour=21, minute=7, second=0, microsecond=0)
+    fin_payload = {"upload_phase": "finish", "video_id": vid, "description": description, "title": title[:100], "access_token": access_token}
+    if ist_now <= target_ist - timedelta(minutes=15):
+        fin_payload["video_state"] = "SCHEDULED"
+        fin_payload["scheduled_publish_time"] = str(int(target_ist.timestamp()))
+        print(f"[INFO] Scheduling Gadget Pulse FB Reel for 9:07 PM IST ({target_ist.isoformat()})!")
+    else:
+        fin_payload["video_state"] = "PUBLISHED"
+    fin_r = requests.post(start_url, data=fin_payload, timeout=30)
+    if not fin_r.ok and fin_payload.get("video_state") == "SCHEDULED":
+        fin_payload.pop("scheduled_publish_time", None)
+        fin_payload["video_state"] = "PUBLISHED"
+        fin_r = requests.post(start_url, data=fin_payload, timeout=30)
+    fin_r.raise_for_status()
     print(f"[SUCCESS] Published Facebook Reel! Video ID: {vid}")
     thumb_jpg = WORK_DIR / "thumbnail.jpg"
     if thumb_jpg.exists():
         with open(thumb_jpg, "rb") as tf:
             requests.post(f"https://graph.facebook.com/{GRAPH_API_VERSION}/{vid}/thumbnails", data={"is_preferred": "true", "access_token": access_token}, files={"source": ("thumbnail.jpg", tf, "image/jpeg")}, timeout=30)
+    if comment_text.strip():
+        try:
+            fc = requests.post(
+                f"https://graph.facebook.com/{GRAPH_API_VERSION}/{vid}/comments",
+                data={"message": comment_text.strip(), "access_token": access_token},
+                timeout=20,
+            )
+            if fc.ok:
+                print("[SUCCESS] Posted affiliate comment on Facebook Reel!")
+            else:
+                print(f"[INFO] Facebook comment skipped (HTTP {fc.status_code}): {fc.text[:160]}")
+        except Exception as exc:
+            print(f"[INFO] Facebook comment skipped: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1128,7 +1165,7 @@ def main() -> None:
             print("[SKIP] No cached Meta payload.")
             return
         meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
-        upload_to_instagram_reels(meta["reels_caption"])
+        upload_to_instagram_reels(meta["reels_caption"], meta.get("comment_text", ""))
         return
 
     if "--publish-fb-only" in sys.argv:
@@ -1137,7 +1174,7 @@ def main() -> None:
             print("[SKIP] No cached FB Reel.")
             return
         meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
-        upload_to_facebook_reels(vid, meta["title"], meta["fb_caption"])
+        upload_to_facebook_reels(vid, meta["title"], meta["fb_caption"], meta.get("comment_text", ""))
         return
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -1170,12 +1207,14 @@ def main() -> None:
     assemble_dual_outro_shorts(plan, clips, main_mp3, main_srt, yt_outro_mp3, meta_outro_mp3, final_yt_mp4, final_meta_mp4)
 
     aff_block = build_affiliate_links_block(plan)
+    print(f"[INFO] Affiliate tags loaded -> Amazon: {bool(os.getenv('AMAZON_AFFILIATE_TAG', '').strip())}, Flipkart: {bool(os.getenv('FLIPKART_AFFILIATE_ID', '').strip())}")
     META_CACHE_FILE.write_text(
         json.dumps(
             {
                 "title": plan.title,
-                "reels_caption": f"{plan.title}\n\n{plan.reels_caption_ml}",
+                "reels_caption": f"{plan.title}\n\n{plan.reels_caption_ml}{aff_block}",
                 "fb_caption": f"{plan.title}\n\n{plan.reels_caption_ml}{aff_block}",
+                "comment_text": f"{plan.product_name} ({plan.price_inr_label})\n{aff_block.strip()}" if aff_block.strip() else "",
             },
             ensure_ascii=False,
         ),

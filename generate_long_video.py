@@ -723,7 +723,15 @@ def upload_long_to_facebook(video_path: Path, title: str, description: str) -> N
             if start_off == end_off:
                 break
     thumb_jpg = WORK_DIR / "long_thumb.jpg"
-    fin_data = {"upload_phase": "finish", "upload_session_id": session_id, "title": title[:100], "description": description[:4900], "published": "true", "access_token": token}
+    fin_data = {"upload_phase": "finish", "upload_session_id": session_id, "title": title[:100], "description": description[:4900], "access_token": token}
+    ist_now = datetime.now(IST_TZ)
+    target_ist = ist_now.replace(hour=21, minute=0, second=0, microsecond=0)
+    if ist_now <= target_ist - timedelta(minutes=12):
+        fin_data["published"] = "false"
+        fin_data["scheduled_publish_time"] = str(int(target_ist.timestamp()))
+        print(f"[INFO] Scheduling Facebook Long Video for 9:00 PM IST ({target_ist.isoformat()})!")
+    else:
+        fin_data["published"] = "true"
     if thumb_jpg.exists():
         with open(thumb_jpg, "rb") as tf:
             requests.post(base_url, data=fin_data, files={"thumb": ("long_thumb.jpg", tf, "image/jpeg")}, timeout=120).raise_for_status()
