@@ -399,38 +399,130 @@ RULES:
 # ---------------------------------------------------------------------------
 # Step 2: Official Product Photo Scraper + Tag-Filtered Stock Clips
 # ---------------------------------------------------------------------------
+def _product_tokens(product_name: str) -> List[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", product_name.lower()) if len(t) >= 2 and t not in {"5g", "pro", "max", "the", "new"}]
+
+
+def _download_valid_product_img(img_url: str, out_img: Path, headers: dict) -> bool:
+    if any(b in img_url.lower() for b in ("logo", "favicon", "avatar", "icon", ".svg", "placeholder", "banner", "sprite")):
+        return False
+    try:
+        ir = requests.get(img_url, headers=headers, timeout=15)
+        if ir.ok and len(ir.content) > 18000:
+            out_img.write_bytes(ir.content)
+            with Image.open(out_img) as im:
+                if im.width >= 400 and im.height >= 280:
+                    im.convert("RGB").save(out_img, quality=92)
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def fetch_google_cse_images(product_name: str, out_dir: Path, max_images: int = 3) -> List[Path]:
+    """Optional direct Google Image Search via Custom Search JSON API (if GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX are set)."""
+    cse_key = os.getenv("GOOGLE_CSE_API_KEY", "").strip()
+    cse_cx = os.getenv("GOOGLE_CSE_CX", "").strip()
+    if not (cse_key and cse_cx and product_name.strip()):
+        return []
+    saved: List[Path] = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": cse_key, "cx": cse_cx, "q": f"{product_name} official image", "searchType": "image", "num": 6, "imgSize": "large"},
+            timeout=15,
+        )
+        if r.ok:
+            for item in r.json().get("items", []):
+                if len(saved) >= max_images:
+                    break
+                link = item.get("link", "")
+                out_img = out_dir / f"gcse_prod_{len(saved)}.jpg"
+                if link and _download_valid_product_img(link, out_img, headers):
+                    saved.append(out_img)
+                    print(f"[INFO] Fetched exact Google Image: {link[:80]}")
+    except Exception as exc:
+        print(f"[WARN] Google CSE image search failed: {exc}")
+    return saved
+
+
+def fetch_gsmarena_product_images(product_name: str, out_dir: Path, max_images: int = 3) -> List[Path]:
+    """Fetches official studio product photos from GSMArena when the exact model matches."""
+    saved: List[Path] = []
+    tokens = _product_tokens(product_name)
+    if not tokens:
+        return saved
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        sr = requests.get(f"https://www.gsmarena.com/res.php3?sSearch={urllib.parse.quote_plus(product_name)}", headers=headers, timeout=15)
+        if not sr.ok:
+            return saved
+        matches = re.findall(r'<a href="([^"]+\.php)">.*?<span>(.*?)</span>', sr.text, flags=re.S)
+        best_href = None
+        for href, raw_name in matches[:8]:
+            clean_name = re.sub(r"<[^>]+>", " ", raw_name).lower()
+            if all(t in clean_name for t in tokens[:2]):
+                best_href = href
+                break
+        if not best_href:
+            return saved
+        pr = requests.get(f"https://www.gsmarena.com/{best_href}", headers=headers, timeout=15)
+        if not pr.ok:
+            return saved
+        img_urls = re.findall(r'https://fdn2\.gsmarena\.com/vv/(?:bigpic|pics)/[^"\'\s>]+\.(?:jpg|jpeg|png|webp)', pr.text)
+        seen = set()
+        for iu in img_urls:
+            if len(saved) >= max_images:
+                break
+            if iu in seen:
+                continue
+            seen.add(iu)
+            out_img = out_dir / f"gsm_prod_{len(saved)}.jpg"
+            if _download_valid_product_img(iu, out_img, headers):
+                saved.append(out_img)
+                print(f"[INFO] Fetched official GSMArena product photo: {iu[:80]}")
+    except Exception as exc:
+        print(f"[WARN] GSMArena lookup skipped for '{product_name}': {exc}")
+    return saved
+
+
 def search_exact_product_images(product_name: str, out_dir: Path, max_images: int = 3) -> List[Path]:
-    """Searches public web images for the exact device name (e.g. 'Nothing Phone 3a') when launch URLs fail."""
+    """Fetches verified exact product photos via Google CSE (if set), GSMArena, and strict-matched Bing Image Search."""
     saved: List[Path] = []
     if not product_name.strip():
         return saved
+
+    saved.extend(fetch_google_cse_images(product_name, out_dir, max_images=max_images))
+    if len(saved) < max_images:
+        saved.extend(fetch_gsmarena_product_images(product_name, out_dir, max_images=max_images - len(saved)))
+    if len(saved) >= max_images:
+        return saved
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    q = urllib.parse.quote_plus(f"{product_name} official product image")
+    tokens = _product_tokens(product_name)
+    q = urllib.parse.quote_plus(f'"{product_name}" official render OR product image')
     try:
         r = requests.get(f"https://www.bing.com/images/search?q={q}&qft=+filterui:imagesize-large&form=HDRSC2", headers=headers, timeout=15)
         if r.ok:
-            # Bing embeds direct image URLs as murl&quot;:&quot;https://...&quot; or "murl":"https://..."
-            urls = re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+)', r.text)
-            for idx, img_url in enumerate(urls[:12]):
+            # Match Bing metadata blocks containing both title (t) and media url (murl)
+            items = re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+).*?t(?:&quot;|")\s*:\s*(?:&quot;|")([^"&]+)', r.text)
+            if not items:
+                items = [(u, u) for u in re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+)', r.text)]
+            for img_url, title_txt in items[:16]:
                 if len(saved) >= max_images:
                     break
-                if any(b in img_url.lower() for b in ("logo", "favicon", "avatar", "icon", ".svg", "placeholder")):
+                combined = f"{img_url} {title_txt}".lower()
+                # Strictly require at least 2 product tokens (e.g. brand + model) to avoid wrong phone photos!
+                if len(tokens) >= 2 and sum(1 for t in tokens if t in combined) < min(2, len(tokens)):
                     continue
-                try:
-                    ir = requests.get(img_url, headers=headers, timeout=15)
-                    if ir.ok and len(ir.content) > 18000:
-                        out_img = out_dir / f"exact_prod_{len(saved)}.jpg"
-                        out_img.write_bytes(ir.content)
-                        with Image.open(out_img) as im:
-                            if im.width >= 450 and im.height >= 300:
-                                im.convert("RGB").save(out_img, quality=92)
-                                saved.append(out_img)
-                                print(f"[INFO] Fetched exact product photo via web search: {img_url[:80]}")
-                except Exception:
-                    continue
+                out_img = out_dir / f"exact_prod_{len(saved)}.jpg"
+                if _download_valid_product_img(img_url, out_img, headers):
+                    saved.append(out_img)
+                    print(f"[INFO] Fetched strict-matched product photo: {img_url[:80]}")
     except Exception as exc:
         print(f"[WARN] Exact product image search failed for '{product_name}': {exc}")
     return saved
@@ -602,14 +694,16 @@ def gather_tech_visual_clips(plan: TechShortPlan, out_dir: Path) -> Tuple[List[P
             prod_imgs.extend(search_exact_product_images(plan.product_name, out_dir, max_images=needed))
         if prod_imgs:
             lead_photo = prod_imgs[0]
-            for idx, p_img in enumerate(prod_imgs):
+            # Ensure at least 4 dynamic product clips by cycling verified photos with varied motion styles
+            expanded_imgs = (prod_imgs * 4)[:max(4, len(prod_imgs))]
+            for idx, p_img in enumerate(expanded_imgs):
                 c_mp4 = out_dir / f"prod_clip_{idx}.mp4"
                 image_to_ken_burns_clip(p_img, c_mp4, duration_sec=3.8, style_idx=idx)
                 clips.append(c_mp4)
 
     pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
     # Only pull generic Pixabay stock if we don't already have >=2 exact product photos
-    if pixabay_key and len(clips) < (3 if plan.is_specific_product else 5):
+    if pixabay_key and (not plan.is_specific_product or len(clips) == 0) and len(clips) < 5:
         for idx, query in enumerate(plan.search_queries):
             if len(clips) >= 4:
                 break
