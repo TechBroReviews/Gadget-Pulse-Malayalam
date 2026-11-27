@@ -60,6 +60,12 @@ EVERGREEN_TECH_TOPICS = [
     "Top Load vs Front Load Washing Machine: Real Water & Power Difference",
     "OLED vs QLED Smart TV: Which Display Is Better for Bright Living Rooms?",
     "How Fast Charging Works and Whether Overnight Charging Hurts Your Phone",
+    "5G vs Wi-Fi 6: Which Actually Saves More Phone Battery?",
+    "Best Smartwatches Under 3000 Rupees in India with AMOLED Display",
+    "How Active Noise Cancellation (ANC) Earbuds Block Traffic Noise",
+    "BLDC Ceiling Fans vs Normal Fans: Real Kerala Electricity Bill Savings",
+    "Best Budget Laptops Under 40000 Rupees for Students in India",
+    "Air Fryer vs Microwave Oven: Which Is Better for Daily Indian Kitchens?",
 ]
 
 OUTRO_STANDARD_ML = (
@@ -137,6 +143,39 @@ def save_used_topic(topic_id: str, used: List[str]) -> None:
     used.append(topic_id)
     HISTORY_FILE.write_text(json.dumps(used[-500:], indent=2), encoding="utf-8")
 
+
+
+
+_FILLER_TOKENS = {
+    "launch", "launched", "india", "price", "specs", "review", "new", "latest",
+    "best", "top", "under", "rupees", "inr", "5g", "pro", "max", "ultra",
+    "plus", "in", "the", "for", "with", "and", "guide", "tech", "gadget",
+}
+
+
+def _core_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    core = {w for w in words if w not in _FILLER_TOKENS and len(w) >= 2}
+    return core or set(words)
+
+
+def is_topic_already_used(candidate: str, used_topics: List[str]) -> bool:
+    """Returns True if candidate is an exact or fuzzy match to any previously covered topic."""
+    if not candidate.strip() or not used_topics:
+        return False
+    cand_norm = re.sub(r"[^a-z0-9]+", " ", candidate.lower()).strip()
+    cand_tokens = _core_tokens(candidate)
+    for prev in used_topics:
+        prev_norm = re.sub(r"[^a-z0-9]+", " ", prev.lower()).strip()
+        if not prev_norm:
+            continue
+        if cand_norm == prev_norm or cand_norm in prev_norm or prev_norm in cand_norm:
+            return True
+        prev_tokens = _core_tokens(prev)
+        overlap = cand_tokens & prev_tokens
+        if len(overlap) >= 2 and (len(overlap) / max(1, min(len(cand_tokens), len(prev_tokens)))) >= 0.6:
+            return True
+    return False
 
 def get_youtube_service():
     for var in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"):
@@ -232,66 +271,82 @@ def generate_tech_short_plan(used_topics: List[str]) -> TechShortPlan:
         raise RuntimeError("Missing GitHub Secret 'GEMINI_API_KEY'.")
     client = genai.Client(api_key=api_key)
     today_ist = datetime.now(IST_TZ).strftime("%B %d, %Y")
-    recent_avoid = ", ".join(used_topics[-30:]) if used_topics else "None"
+    day_seed = datetime.now(IST_TZ).timetuple().tm_yday
+    category_angles = [
+        "wireless earbuds, neckbands, or Bluetooth speakers launched in India",
+        "smart home appliances (robotic vacuum, smart TV, inverter AC, washing machine, or air fryer) in India",
+        "budget or mid-range laptops, tablets, or smartwatches launched in India",
+        "new smartphones launched in India (strictly from a DIFFERENT brand than recently covered ones)",
+    ]
 
-    # Pass 1: Search live Indian tech launches & gadget news
-    research_prompt = f"""
+    blocked_topics = list(used_topics)
+    last_err = None
+
+    for round_idx in range(3):
+        angle = category_angles[(day_seed + round_idx) % len(category_angles)]
+        recent_avoid = ", ".join(blocked_topics[-40:]) if blocked_topics else "None"
+
+        research_prompt = f"""
 Today is {today_ist} in India.
-Search for the most interesting NEW gadget launch, upcoming smartphone/earbuds/laptop announcement, OR useful smart home appliance (robotic vacuum, smart TV, fridge, washing machine) trending in India right now.
-Avoid repeating these recently covered topics: {recent_avoid}
+Search specifically for: {angle}.
+STRICTLY FORBIDDEN (DO NOT PICK ANY OF THESE ALREADY-COVERED PRODUCTS/TOPICS OR SAME MODEL): {recent_avoid}
 
-Find:
+Find ONE fresh, different product or useful tech topic not in the forbidden list:
 1. Exact product name, launch status (available now in India vs upcoming), and verified India price in INR (₹).
 2. 3 key verified specs/features (no guessed numbers!).
 3. 1 to 3 official brand or tech news article URLs from your search results so we can fetch official product images.
 """
-    research_notes = ""
-    for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
-        try:
-            r1 = client.models.generate_content(
-                model=model_name,
-                contents=research_prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    temperature=0.4,
-                ),
+        research_notes = ""
+        for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
+            try:
+                r1 = client.models.generate_content(
+                    model=model_name,
+                    contents=research_prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        temperature=0.5,
+                    ),
+                )
+                cand_notes = (r1.text or "").strip()
+                if cand_notes and not is_topic_already_used(cand_notes.splitlines()[0], blocked_topics):
+                    research_notes = cand_notes
+                    break
+            except Exception as exc:
+                print(f"[WARN] Search pass failed on {model_name}: {exc}")
+
+        if not research_notes:
+            try:
+                rss = requests.get(
+                    "https://news.google.com/rss/search?q=India+launch+earbuds+OR+laptop+OR+smartwatch+OR+smartphone+price&hl=en-IN&gl=IN&ceid=IN:en",
+                    timeout=15,
+                )
+                if rss.ok:
+                    root = ET.fromstring(rss.content)
+                    for item in root.findall(".//item")[:20]:
+                        t_el = item.find("title")
+                        l_el = item.find("link")
+                        t_txt = (t_el.text or "").strip() if t_el is not None else ""
+                        l_txt = (l_el.text or "").strip() if l_el is not None else ""
+                        if t_txt and not is_topic_already_used(t_txt, blocked_topics):
+                            research_notes = f"Live Indian Tech News: {t_txt}\nReference URL: {l_txt}"
+                            break
+            except Exception as exc:
+                print(f"[WARN] Tech RSS fallback failed: {exc}")
+
+        if not research_notes:
+            fallback_topic = next(
+                (t for t in EVERGREEN_TECH_TOPICS if not is_topic_already_used(t, blocked_topics)),
+                EVERGREEN_TECH_TOPICS[day_seed % len(EVERGREEN_TECH_TOPICS)],
             )
-            research_notes = r1.text or ""
-            if research_notes.strip():
-                break
-        except Exception as exc:
-            print(f"[WARN] Search pass failed on {model_name}: {exc}")
+            research_notes = f"Topic: {fallback_topic}. General buying & tech guide for Indian buyers."
 
-    if not research_notes.strip():
-        # Live Indian tech news RSS fallback if Gemini Search tool hits 429
-        try:
-            rss = requests.get(
-                "https://news.google.com/rss/search?q=India+launch+smartphone+OR+earbuds+OR+laptop+price&hl=en-IN&gl=IN&ceid=IN:en",
-                timeout=15,
-            )
-            if rss.ok:
-                root = ET.fromstring(rss.content)
-                for item in root.findall(".//item")[:10]:
-                    t_el = item.find("title")
-                    l_el = item.find("link")
-                    t_txt = (t_el.text or "").strip() if t_el is not None else ""
-                    l_txt = (l_el.text or "").strip() if l_el is not None else ""
-                    if t_txt and t_txt not in used_topics:
-                        research_notes = f"Live Indian Tech News: {t_txt}\nReference URL: {l_txt}"
-                        break
-        except Exception as exc:
-            print(f"[WARN] Tech RSS fallback failed: {exc}")
-
-    if not research_notes.strip():
-        fallback_topic = next((t for t in EVERGREEN_TECH_TOPICS if t not in used_topics), EVERGREEN_TECH_TOPICS[0])
-        research_notes = f"Topic: {fallback_topic}. General buying & tech guide for Indian buyers."
-
-    # Pass 2: Convert verified research into structured Malayalam script plan
-    script_prompt = f"""
+        script_prompt = f"""
 You are the host of "Gadget Pulse Malayalam", a crisp, trustworthy Kerala Malayalam tech & gadgets channel covering phones, earbuds, laptops, and smart home appliances (robotic vacuums, TVs, fridges, washing machines).
 
 VERIFIED RESEARCH NOTES:
 {research_notes}
+
+STRICTLY FORBIDDEN TOPICS (NEVER REPEAT THESE): {recent_avoid}
 
 RULES:
 1. Only state verified prices and specs from the notes above—never invent numbers.
@@ -300,8 +355,6 @@ RULES:
 4. For 'search_queries', give 4 literal 2-to-3 word English visual phrases (never abbreviations like TWS/ANC/OLED).
 5. Set 'available_in_india' to True ONLY if the product is currently on sale in India (not rumored/upcoming/general tip).
 """
-    last_err = None
-    for attempt in range(3):
         for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
             try:
                 resp = client.models.generate_content(
@@ -313,16 +366,33 @@ RULES:
                         temperature=0.75,
                     ),
                 )
-                return TechShortPlan.model_validate_json(resp.text)
+                plan = TechShortPlan.model_validate_json(resp.text)
+                if is_topic_already_used(plan.topic_key, blocked_topics) or is_topic_already_used(plan.product_name, blocked_topics):
+                    print(f"[WARN] Rejected duplicate topic '{plan.product_name}' ({plan.topic_key}); retrying another category...")
+                    blocked_topics.extend([plan.topic_key, plan.product_name])
+                    break
+                return plan
             except Exception as exc:
-                print(f"[WARN] Script generation failed on {model_name} (try {attempt + 1}/3): {exc}")
+                print(f"[WARN] Script generation failed on {model_name}: {exc}")
                 last_err = exc
                 if "503" in str(exc) or "UNAVAILABLE" in str(exc):
                     time.sleep(6)
-        if attempt < 2:
-            wait_s = 12 * (attempt + 1)
-            print(f"[INFO] Waiting {wait_s}s before retrying Gemini models...")
-            time.sleep(wait_s)
+
+    # Final guaranteed-unique evergreen fallback
+    fallback_topic = next(
+        (t for t in EVERGREEN_TECH_TOPICS if not is_topic_already_used(t, blocked_topics)),
+        EVERGREEN_TECH_TOPICS[day_seed % len(EVERGREEN_TECH_TOPICS)],
+    )
+    for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
+        try:
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=f"Create a crisp Malayalam Tech Short script about: {fallback_topic}. 110-135 spoken Malayalam words, no outro.",
+                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=TechShortPlan, temperature=0.7),
+            )
+            return TechShortPlan.model_validate_json(resp.text)
+        except Exception as exc:
+            last_err = exc
     raise RuntimeError(f"All Gemini models failed: {last_err}")
 
 
