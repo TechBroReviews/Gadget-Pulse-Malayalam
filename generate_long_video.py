@@ -21,7 +21,7 @@ import urllib.parse
 import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from google import genai
@@ -71,8 +71,12 @@ class GadgetChapter(BaseModel):
     product_name: str = Field(description="Exact product name for this chapter (for affiliate links & official photo lookup).")
     available_in_india: bool = Field(description="True if on sale in India now.")
     price_inr_label: str = Field(description="Verified India INR price or guide tip label (e.g. '₹19,999').")
-    narration_ml: str = Field(description="170-210 words of natural conversational Kerala Malayalam narration.")
-    key_fact_ml: str = Field(description="Crisp 1-line Malayalam takeaway (max 85 chars) for lower-third callout.")
+    narration_ml: str = Field(description="170-210 words of natural conversational Kerala Malayalam narration. Keep exact English product/brand names in narration_ml.")
+    pronunciation_pairs: List[str] = Field(
+        default_factory=list,
+        description="List of 'English Term => Phonetic Malayalam' pairs for every English product/brand/model/spec name in narration_ml (e.g. 'iQOO Neo 10R => ഐക്യൂ നിയോ ടെൻ ആർ', 'OnePlus 13R => വൺപ്ലസ് തേർട്ടീൻ ആർ').",
+    )
+    key_fact_ml: str = Field(description="Crisp 1-line Malayalam takeaway (max 85 chars) for top product callout box.")
     official_page_urls: List[str] = Field(description="1-2 official/launch URLs from search results for this product.")
     search_queries: List[str] = Field(description="3 literal English visual search terms (no abbreviations) for 16:9 stock clips.")
 
@@ -171,6 +175,9 @@ Use Google Search to gather 5 real, currently relevant products/topics in India 
 Create a complete 5-chapter Malayalam YouTube video plan (~8-9 min) for "Gadget Pulse Malayalam" based ONLY on these verified facts:
 {research_text}
 Keep Kerala Malayalam warm, conversational, and practical for everyday buyers.
+IMPORTANT:
+- Keep exact English product/brand names in narration_ml (so on-screen subtitles show proper English).
+- In each chapter's pronunciation_pairs, provide 'English Term => Phonetic Malayalam' for every English brand, model, or tech term so the Malayalam voiceover pronounces them accurately.
 """
     for attempt in range(3):
         for m in [x for x in GEMINI_MODEL_CANDIDATES if x]:
@@ -300,19 +307,21 @@ def render_chapter_card(num: int, ch: GadgetChapter, out_png: Path, font_path: s
 
 
 def render_callout_overlay(ch: GadgetChapter, out_png: Path, font_path: str) -> None:
+    """Renders the product description box at the TOP of the 1920x1080 frame so bottom subtitles never overlap."""
     img = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     lat_path = find_latin_font()
     f_h_ml, f_h_lat = ImageFont.truetype(font_path, 32), ImageFont.truetype(lat_path, 32)
-    f_b_ml, f_b_lat = ImageFont.truetype(font_path, 38), ImageFont.truetype(lat_path, 38)
+    f_b_ml, f_b_lat = ImageFont.truetype(font_path, 36), ImageFont.truetype(lat_path, 36)
     lines = wrap_mixed_px(d, ch.key_fact_ml, f_b_ml, f_b_lat, 1640)[:2]
-    y0 = max(780, 1030 - (84 + len(lines) * 52))
-    d.rounded_rectangle([80, y0, 1840, 1030], radius=24, fill=(10, 18, 36, 225), outline=(0, 229, 255, 235), width=4)
-    draw_mixed_at(d, 120, y0 + 22, f"{ch.product_name}  ({ch.price_inr_label})", f_h_ml, f_h_lat, (250, 204, 21))
-    cy = y0 + 72
+    y0 = 28
+    y1 = y0 + 82 + len(lines) * 48
+    d.rounded_rectangle([80, y0, 1840, y1], radius=24, fill=(10, 18, 36, 228), outline=(0, 229, 255, 235), width=4)
+    draw_mixed_at(d, 120, y0 + 20, f"{ch.product_name}  ({ch.price_inr_label})", f_h_ml, f_h_lat, (250, 204, 21))
+    cy = y0 + 68
     for ln in lines:
         draw_mixed_at(d, 120, cy, ln, f_b_ml, f_b_lat, (255, 255, 255))
-        cy += 52
+        cy += 48
     img.save(out_png)
 
 
@@ -371,7 +380,7 @@ def render_dynamic_product_16x9(img_path: Path, out_mp4: Path, duration_sec: flo
     fps = 30
     total_frames = max(60, int(round(duration_sec * fps)))
     W, H = 1920, 1080
-    cx, cy = 960, 445  # Upper-center stage cleanly above lower-third callout box
+    cx, cy = 960, 535  # Center stage cleanly between top product box and bottom subtitles
     bg = Image.new("RGB", (W, H), (9, 16, 34))
     bg_d = ImageDraw.Draw(bg)
     for gx in range(0, W, 120):
@@ -380,7 +389,7 @@ def render_dynamic_product_16x9(img_path: Path, out_mp4: Path, duration_sec: flo
         bg_d.line([(0, gy), (W, gy)], fill=(16, 28, 56), width=2)
 
     prod = ImageEnhance.Color(Image.open(img_path).convert("RGB")).enhance(1.18)
-    base_scale = min(980 / prod.width, 620 / prod.height)
+    base_scale = min(920 / prod.width, 520 / prod.height)
     bw, bh = max(240, int(prod.width * base_scale)), max(200, int(prod.height * base_scale))
     prod_base = prod.resize((bw, bh), Image.Resampling.LANCZOS)
     accent = (0, 229, 255) if style_idx % 2 == 0 else (250, 204, 21)
@@ -560,6 +569,69 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     ass_path.write_text(header + "\n".join(ev_lines) + "\n", encoding="utf-8")
 
 
+COMMON_TECH_PRONUNCIATIONS: Dict[str, str] = {
+    "iQOO": "ഐക്യൂ",
+    "OnePlus": "വൺപ്ലസ്",
+    "Realme": "റിയൽമി",
+    "Redmi": "റെഡ്മി",
+    "Xiaomi": "ഷവോമി",
+    "Samsung": "സാംസങ്",
+    "Motorola": "മോട്ടറോള",
+    "Nothing": "നത്തിങ്",
+    "POCO": "പോക്കോ",
+    "Vivo": "വിവോ",
+    "OPPO": "ഓപ്പോ",
+    "iPhone": "ഐഫോൺ",
+    "iPad": "ഐപാഡ്",
+    "MacBook": "മാക്ബുക്ക്",
+    "AirPods": "എയർപോഡ്സ്",
+    "boAt": "ബോട്ട്",
+    "CMF": "സി എം എഫ്",
+    "JBL": "ജെ ബി എൽ",
+    "Sony": "സോണി",
+    "ASUS": "അസൂസ്",
+    "Lenovo": "ലെനോവോ",
+    "AMOLED": "അമോലെഡ്",
+    "QLED": "ക്യുലെഡ്",
+    "OLED": "ഒലെഡ്",
+    "TWS": "ടി ഡബ്ല്യു എസ്",
+    "ANC": "എ എൻ സി",
+    "mAh": "എം എ എച്ച്",
+    "5G": "ഫൈവ് ജി",
+    "4K": "ഫോർ കെ",
+    "USB-C": "യു എസ് ബി സി",
+    "Wi-Fi": "വൈ ഫൈ",
+    "HDMI": "എച്ച് ഡി എം ഐ",
+}
+
+
+def build_pronunciation_map(extra_pairs: Optional[List[str]] = None) -> List[Tuple[str, str]]:
+    mapping: Dict[str, str] = dict(COMMON_TECH_PRONUNCIATIONS)
+    for item in extra_pairs or []:
+        if "=>" in item:
+            eng, ml = [p.strip() for p in item.split("=>", 1)]
+            if eng and ml:
+                mapping[eng] = ml
+    return sorted(mapping.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+
+def prepare_text_for_tts(text: str, pairs: List[Tuple[str, str]]) -> str:
+    out = text
+    for eng, ml in pairs:
+        pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(eng)}(?![A-Za-z0-9])", flags=re.IGNORECASE)
+        out = pattern.sub(ml, out)
+    return out
+
+
+def restore_english_in_srt(srt_path: Path, pairs: List[Tuple[str, str]]) -> None:
+    if not srt_path.exists():
+        return
+    txt = srt_path.read_text(encoding="utf-8", errors="ignore")
+    for eng, ml in sorted(pairs, key=lambda kv: len(kv[1]), reverse=True):
+        txt = txt.replace(ml, eng)
+    srt_path.write_text(txt, encoding="utf-8")
+
+
 def tts_to_mp3(text: str, out_mp3: Path, out_srt: Optional[Path] = None) -> float:
     cmd = ["edge-tts", "--voice", TTS_VOICE, "--rate=-3%", "--pitch=-1Hz", "--text", text, "--write-media", str(out_mp3)]
     if out_srt is not None:
@@ -589,7 +661,8 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
 
     # 5-clip Intro Montage
     intro_mp3 = WORK_DIR / "intro.mp3"
-    intro_dur = tts_to_mp3(plan.intro_narration_ml, intro_mp3)
+    all_pairs = build_pronunciation_map([p for ch in plan.chapters for p in ch.pronunciation_pairs])
+    intro_dur = tts_to_mp3(prepare_text_for_tts(plan.intro_narration_ml, all_pairs), intro_mp3)
     per_i = max(2.5, intro_dur / len(lead_clips))
     i_trims = []
     for k, lc in enumerate(lead_clips):
@@ -614,7 +687,9 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
         ch_mp3 = WORK_DIR / f"ch_{idx}.mp3"
         ch_srt = WORK_DIR / f"ch_{idx}.srt"
         ch_ass = WORK_DIR / f"ch_{idx}.ass"
-        ch_dur = tts_to_mp3(ch.narration_ml, ch_mp3, ch_srt)
+        ch_pairs = build_pronunciation_map(ch.pronunciation_pairs)
+        ch_dur = tts_to_mp3(prepare_text_for_tts(ch.narration_ml, ch_pairs), ch_mp3, ch_srt)
+        restore_english_in_srt(ch_srt, ch_pairs)
         srt_to_karaoke_ass(ch_srt, ch_ass)
         ch_clips = [WORK_DIR / f"ch_{idx}_clip_0.mp4"] if (WORK_DIR / f"ch_{idx}_clip_0.mp4").exists() else []
         for q_i, q in enumerate(ch.search_queries[1:3], start=1):
@@ -641,7 +716,7 @@ def build_long_video(plan: LongTechPlan) -> tuple[Path, Path, str]:
         elapsed += ch_dur
 
     outro_mp3 = WORK_DIR / "outro.mp3"
-    outro_dur = tts_to_mp3(plan.outro_narration_ml, outro_mp3)
+    outro_dur = tts_to_mp3(prepare_text_for_tts(plan.outro_narration_ml, all_pairs), outro_mp3)
     outro_seg = WORK_DIR / "seg_outro.mp4"
     subprocess.run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(lead_clips[0]), "-i", str(outro_mp3), "-t", f"{outro_dur:.2f}", "-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg)], check=True)
     segments.append(outro_seg)
@@ -706,7 +781,6 @@ def upload_long_to_youtube(video_path: Path, thumb_jpg: Path, plan: LongTechPlan
         token_uri="https://oauth2.googleapis.com/token",
         client_id=os.environ["YT_CLIENT_ID"].strip(),
         client_secret=os.environ["YT_CLIENT_SECRET"].strip(),
-        scopes=["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.force-ssl"],
     )
     yt = build("youtube", "v3", credentials=creds)
     status_obj = {"privacyStatus": PRIVACY_STATUS, "selfDeclaredMadeForKids": False, "containsSyntheticMedia": False}
@@ -814,17 +888,21 @@ def upload_long_to_facebook(video_path: Path, title: str, description: str) -> N
 
 
 def main() -> None:
+    today_ist = datetime.now(IST_TZ).strftime("%Y-%m-%d")
     if "--publish-fb-only" in sys.argv:
         vid = WORK_DIR / "long_video.mp4"
         if vid.exists() and META_CACHE_FILE.exists():
             m = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
+            if m.get("date_ist") and m.get("date_ist") != today_ist:
+                print(f"[SKIP] Cached FB Long Video is from {m.get('date_ist')} (expected {today_ist}); skipping stale video.")
+                return
             upload_long_to_facebook(vid, m["title"], m["description"])
         return
 
     cat = get_today_category()
     topic_key, plan = generate_plan(cat)
     vid_path, thumb_path, chapters_txt = build_long_video(plan)
-    META_CACHE_FILE.write_text(json.dumps({"title": plan.title, "description": f"{plan.description}\n\n{chapters_txt}{build_affiliate_desc(plan)}"}, ensure_ascii=False), encoding="utf-8")
+    META_CACHE_FILE.write_text(json.dumps({"date_ist": today_ist, "title": plan.title, "description": f"{plan.description}\n\n{chapters_txt}{build_affiliate_desc(plan)}"}, ensure_ascii=False), encoding="utf-8")
     yt_id = upload_long_to_youtube(vid_path, thumb_path, plan, chapters_txt, cat)
     save_history(topic_key, yt_id, plan.title, cat)
 

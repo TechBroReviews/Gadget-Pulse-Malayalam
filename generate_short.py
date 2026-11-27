@@ -148,10 +148,6 @@ def get_youtube_service():
         token_uri="https://oauth2.googleapis.com/token",
         client_id=os.environ["YT_CLIENT_ID"].strip(),
         client_secret=os.environ["YT_CLIENT_SECRET"].strip(),
-        scopes=[
-            "https://www.googleapis.com/auth/youtube.upload",
-            "https://www.googleapis.com/auth/youtube.force-ssl",
-        ],
     )
     return build("youtube", "v3", credentials=creds)
 
@@ -1240,11 +1236,16 @@ def upload_to_facebook_reels(video_path: Path, title: str, description: str, com
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    today_ist = datetime.now(IST_TZ).strftime("%Y-%m-%d")
+
     if "--publish-ig-only" in sys.argv:
         if not META_CACHE_FILE.exists():
             print("[SKIP] No cached Meta payload.")
             return
         meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
+        if meta.get("date_ist") and meta.get("date_ist") != today_ist:
+            print(f"[SKIP] Cached IG Reel is from {meta.get('date_ist')} (expected {today_ist}); skipping stale video.")
+            return
         upload_to_instagram_reels(meta["reels_caption"], meta.get("comment_text", ""))
         return
 
@@ -1254,6 +1255,9 @@ def main() -> None:
             print("[SKIP] No cached FB Reel.")
             return
         meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
+        if meta.get("date_ist") and meta.get("date_ist") != today_ist:
+            print(f"[SKIP] Cached FB Reel is from {meta.get('date_ist')} (expected {today_ist}); skipping stale video.")
+            return
         upload_to_facebook_reels(vid, meta["title"], meta["fb_caption"], meta.get("comment_text", ""))
         return
 
@@ -1291,6 +1295,7 @@ def main() -> None:
     META_CACHE_FILE.write_text(
         json.dumps(
             {
+                "date_ist": today_ist,
                 "title": plan.title,
                 "reels_caption": f"{plan.title}\n\n{plan.reels_caption_ml}{aff_block}",
                 "fb_caption": f"{plan.title}\n\n{plan.reels_caption_ml}{aff_block}",
