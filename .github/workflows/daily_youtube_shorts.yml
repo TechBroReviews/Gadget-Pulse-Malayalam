@@ -101,9 +101,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p build_short
-          for RID in $(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=10 --json databaseId -q '.[].databaseId'); do
+          TODAY_UTC=$(date -u +%Y-%m-%d)
+          for RID in $(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=10 --json databaseId,createdAt -q ".[] | select(.createdAt | startswith(\"$TODAY_UTC\")) | .databaseId"); do
             if gh run download "$RID" --name gadget-ig-reel-handoff --dir build_short 2>/dev/null; then
-              echo "Downloaded gadget-ig-reel-handoff from run $RID"
+              echo "Downloaded today's gadget-ig-reel-handoff from run $RID"
               break
             fi
           done
@@ -155,9 +156,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p build_short
-          for RID in $(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=10 --json databaseId -q '.[].databaseId'); do
+          TODAY_UTC=$(date -u +%Y-%m-%d)
+          for RID in $(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=10 --json databaseId,createdAt -q ".[] | select(.createdAt | startswith(\"$TODAY_UTC\")) | .databaseId"); do
             if gh run download "$RID" --name gadget-ig-reel-handoff --dir build_short 2>/dev/null; then
-              echo "Downloaded gadget-ig-reel-handoff from run $RID"
+              echo "Downloaded today's gadget-ig-reel-handoff from run $RID"
               break
             fi
           done

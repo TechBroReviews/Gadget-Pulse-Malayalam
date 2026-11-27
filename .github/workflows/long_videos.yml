@@ -109,9 +109,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p build_long
-          for RID in $(gh run list --workflow="long_videos.yml" --status=success --limit=10 --json databaseId -q '.[].databaseId'); do
+          TODAY_UTC=$(date -u +%Y-%m-%d)
+          for RID in $(gh run list --workflow="long_videos.yml" --status=success --limit=10 --json databaseId,createdAt -q ".[] | select(.createdAt | startswith(\"$TODAY_UTC\")) | .databaseId"); do
             if gh run download "$RID" --name gadget-long-video-fb-handoff --dir build_long 2>/dev/null; then
-              echo "Downloaded gadget-long-video-fb-handoff from run $RID"
+              echo "Downloaded today's gadget-long-video-fb-handoff from run $RID"
               break
             fi
           done
